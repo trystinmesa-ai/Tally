@@ -31,6 +31,12 @@ const byDateDesc = (a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.cr
 
 function setMeta(key, value) { S.meta[key] = value; return DB.put('meta', { key, value }); }
 
+/** Keep the app fixed to the screen like a native app: no pinch zoom (iOS ignores user-scalable=no). */
+function lockZoom() {
+  for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
+  document.addEventListener('touchmove', (e) => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
+}
+
 async function requestPersistence() {
   try { if (navigator.storage && navigator.storage.persist) await navigator.storage.persist(); } catch {}
 }
@@ -60,6 +66,7 @@ async function reloadFromDb() {
 }
 
 async function init() {
+  lockZoom();
   try {
     await loadState();
   } catch (e) {

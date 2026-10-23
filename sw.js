@@ -1,6 +1,6 @@
 // Offline support: cache the app shell and serve it cache-first.
 // Only this app's own files are cached. Sync requests to Supabase (another origin) always go to the network.
-const VERSION = 'tally-v1.1.0';
+const VERSION = 'tally-v1.1.1';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/styles.css',
   'js/app.js', 'js/cloud.js', 'js/core.js', 'js/db.js', 'js/ui.js',
