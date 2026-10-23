@@ -1,5 +1,6 @@
 import * as C from './core.js';
 import * as DB from './db.js';
+import * as Cloud from './cloud.js';
 import { h, sv, icon, replace, clear, openSheet, closeAllSheets, sheetOpen, confirmDialog, toast } from './ui.js';
 
 // ---------- Constants ----------
@@ -40,12 +41,27 @@ function fail(e) {
 }
 
 // ---------- Boot ----------
+async function loadState() {
+  const d = await DB.loadAll();
+  S.cats = d.categories; S.txs = d.transactions; S.recs = d.recurring; S.budgets = d.budgets;
+  S.meta = Object.fromEntries(d.meta.map((m) => [m.key, m.value]));
+  if (!S.meta.seeded) await seedCategories();
+}
+
+const typingInApp = () => {
+  const a = document.activeElement;
+  return a && document.getElementById('app').contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName);
+};
+
+/** Reload after sync changed local data. Sheets keep working; the screen behind them redraws. */
+async function reloadFromDb() {
+  await loadState();
+  if (!typingInApp()) render();
+}
+
 async function init() {
   try {
-    const d = await DB.loadAll();
-    S.cats = d.categories; S.txs = d.transactions; S.recs = d.recurring; S.budgets = d.budgets;
-    S.meta = Object.fromEntries(d.meta.map((m) => [m.key, m.value]));
-    if (!S.meta.seeded) await seedCategories();
+    await loadState();
   } catch (e) {
     console.error(e);
     replace(document.getElementById('app'), h('div', { class: 'screen' }, h('div', { class: 'card empty' },
@@ -54,6 +70,7 @@ async function init() {
     return;
   }
   render();
+  Cloud.init({ onRemote: reloadFromDb });
   document.addEventListener('visibilitychange', () => { if (!document.hidden && !sheetOpen()) render(); });
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW registration failed', e));
@@ -1007,10 +1024,107 @@ function openRecForm(existing = null) {
   if (!editing) amount.focus();
 }
 
+// ---------- Account & sync ----------
+function syncStatusText(st) {
+  switch (st.state) {
+    case 'syncing': return 'Syncing…';
+    case 'ok': return `Synced ${Date.now() - st.lastSync < 60 * 1000 ? 'just now' : 'at ' + new Date(st.lastSync).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+    case 'offline': return 'Offline. Changes are saved on this device and will upload when you’re back online.';
+    case 'error': return `Couldn’t sync: ${st.error} Tally will keep trying.`;
+    default: return 'Waiting to sync…';
+  }
+}
+
+/** Account card for Settings. onStatus registers a status listener the caller removes on redraw/close. */
+function accountSection(redraw, onStatus) {
+  const u = Cloud.user();
+  if (u) {
+    const line = h('p', { class: 'small muted', style: 'margin:4px 0 0', 'aria-live': 'polite' });
+    const update = (st) => { if (!Cloud.user()) redraw(); else line.textContent = syncStatusText(st); };
+    onStatus(update); update(Cloud.status);
+    return h('div', { class: 'card prose', style: 'margin-top:0' },
+      h('p', { style: 'margin:0' }, 'Signed in as ', h('strong', { text: u.email })), line,
+      h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px' },
+        h('button', { class: 'btn sm', onclick: () => Cloud.sync() }, 'Sync now'),
+        h('button', { class: 'btn sm', onclick: openPasswordForm }, 'Change password'),
+        h('button', { class: 'btn sm danger', onclick: () => signOutFlow(redraw) }, 'Sign out')));
+  }
+  const expired = Cloud.expiredFor();
+  const email = h('input', { class: 'input', id: 'a-email', type: 'email', autocomplete: 'username', inputmode: 'email', autocapitalize: 'off', spellcheck: 'false', value: expired?.email ?? '' });
+  const pw = h('input', { class: 'input', id: 'a-pw', type: 'password', autocomplete: 'current-password' });
+  const err = h('div', { class: 'err', role: 'alert' });
+  const btn = h('button', { type: 'submit', class: 'btn primary block', style: 'margin-top:12px' }, 'Sign in');
+  const submit = async (e) => {
+    e.preventDefault();
+    const em = email.value.trim();
+    if (!em || !pw.value) { err.textContent = 'Enter your email and password'; return; }
+    err.textContent = ''; btn.disabled = true; btn.textContent = 'Signing in…';
+    try {
+      const ok = await Cloud.signIn(em, pw.value, (other) => confirmDialog({
+        title: 'Switch accounts?',
+        message: [`This device has data from ${other}. Signing in as ${em} removes it from this device. It stays in ${other}’s account.`],
+        confirmLabel: 'Switch account', danger: true }));
+      if (ok) { await reloadFromDb(); toast('Signed in. Your data is backed up and syncing.'); }
+      redraw();
+    } catch (ex) {
+      err.textContent = ex.message; btn.disabled = false; btn.textContent = 'Sign in';
+    }
+  };
+  return h('form', { class: 'card prose', style: 'margin-top:0', onsubmit: submit, novalidate: true },
+    h('p', { style: 'margin:0', text: expired
+      ? 'Your sign-in expired. Sign in again to keep syncing. Everything on this device is still here.'
+      : 'Sign in to back up your data and use it on more than one device.' }),
+    h('div', { class: 'field' }, h('label', { for: 'a-email', text: 'Email' }), email),
+    h('div', { class: 'field' }, h('label', { for: 'a-pw', text: 'Password' }), pw, err),
+    btn);
+}
+
+async function signOutFlow(redraw) {
+  await Cloud.sync();
+  const n = await DB.pendingCount();
+  const message = n
+    ? [`${n} change${n === 1 ? ' hasn’t' : 's haven’t'} uploaded yet${Cloud.status.state === 'offline' ? ' because you’re offline' : ''}. Signing out now will lose ${n === 1 ? 'it' : 'them'}.`, 'Everything else is safe in your account.']
+    : ['Your data stays in your account. It will be removed from this device until you sign in again.'];
+  if (!(await confirmDialog({ title: 'Sign out?', message, confirmLabel: 'Sign out', danger: true }))) return;
+  try {
+    await Cloud.signOut();
+    await reloadFromDb();
+    redraw(); toast('Signed out');
+  } catch (e) { fail(e); }
+}
+
+function openPasswordForm() {
+  const pw = h('input', { class: 'input', id: 'p-new', type: 'password', autocomplete: 'new-password' });
+  const pw2 = h('input', { class: 'input', id: 'p-new2', type: 'password', autocomplete: 'new-password' });
+  const err = h('div', { class: 'err', role: 'alert' });
+  let busy = false;
+  const save = async () => {
+    if (busy) return;
+    if (pw.value.length < 8) { err.textContent = 'Use at least 8 characters'; return; }
+    if (pw.value !== pw2.value) { err.textContent = 'The passwords don’t match'; return; }
+    busy = true; err.textContent = '';
+    try { await Cloud.changePassword(pw.value); sh.close(); toast('Password changed'); }
+    catch (e) { busy = false; err.textContent = e.message; }
+  };
+  const sh = openSheet({
+    title: 'Change password', dismissOnBackdrop: false,
+    body: h('form', { onsubmit: (e) => { e.preventDefault(); save(); }, novalidate: true },
+      h('div', { class: 'field', style: 'margin-top:4px' }, h('label', { for: 'p-new', text: 'New password' }), pw),
+      h('div', { class: 'field' }, h('label', { for: 'p-new2', text: 'Confirm new password' }), pw2, err),
+      h('button', { type: 'submit', hidden: true, tabindex: -1, 'aria-hidden': 'true' })),
+    foot: [h('button', { class: 'btn primary', onclick: save }, 'Change password')],
+  });
+  pw.focus();
+}
+
 // ---------- Settings & categories ----------
 function openSettings() {
   const body = h('div');
+  let unsub = null;
+  const onStatus = (fn) => { unsub = Cloud.subscribe(fn); };
   const draw = () => {
+    if (unsub) { unsub(); unsub = null; }
+    const signedIn = !!Cloud.user();
     const list = (kind) => h('ul', { class: 'settings-list' }, activeCats(kind).filter((c) => !c.archived).map((c) => h('li', null,
       h('button', { onclick: () => openCategoryForm(c, draw) }, h('span', { class: 'dot', style: `background:${c.color}` }), h('span', { class: 'grow', text: c.name }), icon('right')))),
       h('li', null, h('button', { class: 'muted', onclick: () => openCategoryForm(null, draw, kind) }, h('span', { class: 'dot', style: 'background:transparent;box-shadow:inset 0 0 0 1.5px var(--faint)' }), h('span', { class: 'grow', text: `Add ${kind === 'income' ? 'income' : 'spending'} category` }))));
@@ -1018,26 +1132,33 @@ function openSettings() {
     const persistLine = h('p', { class: 'small faint', text: '' });
     if (navigator.storage && navigator.storage.persisted) navigator.storage.persisted().then((p) => { persistLine.textContent = p ? 'This browser has marked Tally’s storage as persistent.' : 'This browser hasn’t marked storage as persistent (normal on iPhone).'; }).catch(() => {});
     replace(body,
-      h('div', { class: 'section-label', style: 'margin-top:0', text: 'Spending categories' }), h('div', { class: 'group' }, list('expense')),
+      h('div', { class: 'section-label', style: 'margin-top:0', text: 'Account & sync' }), accountSection(draw, onStatus),
+      h('div', { class: 'section-label', text: 'Spending categories' }), h('div', { class: 'group' }, list('expense')),
       h('div', { class: 'section-label', text: 'Income categories' }), h('div', { class: 'group' }, list('income')),
       archived.length ? [h('div', { class: 'section-label', text: 'Archived categories' }), h('div', { class: 'group' }, h('ul', { class: 'settings-list' }, archived.map((c) => h('li', null,
         h('button', { onclick: () => openCategoryForm(c, draw) }, h('span', { class: 'dot', style: `background:${c.color};opacity:.5` }), h('span', { class: 'grow', text: c.name }), h('span', { class: 'tag', text: c.kind === 'income' ? 'Income' : 'Spending' }))))))] : null,
       h('div', { class: 'section-label', text: 'Your data' }),
-      h('div', { class: 'card prose', style: 'margin-top:0' },
-        h('p', null, h('strong', { text: 'Stored only on this device. ' }), 'Tally keeps your transactions in this browser’s on-device storage (IndexedDB). There’s no account, no cloud copy, and nothing is sent to any server or analytics service.'),
-        h('p', null, h('strong', { text: 'This is not a backup. ' }), 'Your data can be lost if you clear Safari website data, remove the Home Screen app, reset or replace your phone, or if iOS clears storage. This version has no export.'),
+      h('div', { class: 'card prose', style: 'margin-top:0' }, signedIn ? [
+        h('p', null, h('strong', { text: 'Saved on this device and in your account. ' }), 'Changes upload automatically when you’re online, and your other signed-in devices pick them up. Only your account can read your data.'),
+        h('p', { text: 'Tally keeps working offline; anything you add uploads the next time you’re connected.' }),
+      ] : [
+        h('p', null, h('strong', { text: 'Stored only on this device. ' }), 'Tally keeps your transactions in this browser’s on-device storage (IndexedDB). Unless you sign in, nothing is sent to any server, and there’s never any analytics.'),
+        h('p', null, h('strong', { text: 'This is not a backup. ' }), 'Your data can be lost if you clear Safari website data, remove the Home Screen app, reset or replace your phone, or if iOS clears storage. Sign in above to back it up.'),
         h('p', { text: 'On iPhone, Safari and the Home Screen app keep separate data, so use Tally from one place.' }),
-        persistLine),
+        persistLine]),
       h('div', { class: 'section-label', text: 'About' }),
-      h('div', { class: 'card prose', style: 'margin-top:0' }, h('p', { text: 'Tally 1.0 · Works offline after first load. All amounts in US dollars.' })),
-      h('button', { class: 'btn danger block', style: 'margin-top:24px', onclick: eraseEverything }, 'Erase all data on this device'));
+      h('div', { class: 'card prose', style: 'margin-top:0' }, h('p', { text: 'Tally 1.1 · Works offline after first load. All amounts in US dollars.' })),
+      h('button', { class: 'btn danger block', style: 'margin-top:24px', onclick: eraseEverything }, signedIn ? 'Erase all data' : 'Erase all data on this device'));
   };
   draw();
-  openSheet({ title: 'Settings', body });
+  openSheet({ title: 'Settings', body, onClose: () => { if (unsub) unsub(); } });
 }
 
 async function eraseEverything() {
-  const ok = await confirmDialog({ title: 'Erase all data?', message: ['This permanently deletes every transaction, schedule, budget and category on this device. It can’t be undone.'], confirmLabel: 'Erase everything', danger: true });
+  const u = Cloud.user();
+  const ok = await confirmDialog({ title: 'Erase all data?', message: [u
+    ? `This permanently deletes every transaction, schedule, budget and category on this device and in your account (${u.email}), including on your other devices. It can’t be undone.`
+    : 'This permanently deletes every transaction, schedule, budget and category on this device. It can’t be undone.'], confirmLabel: 'Erase everything', danger: true });
   if (!ok) return;
   try {
     await DB.eraseAll();

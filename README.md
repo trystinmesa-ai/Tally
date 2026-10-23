@@ -1,6 +1,6 @@
 # Tally: private money tracker (PWA)
 
-A phone-first web app for logging income and spending by hand. Everything is stored on your device (IndexedDB). It has no accounts, no servers, no analytics and no bank connections.
+A phone-first web app for logging income and spending by hand. Everything is stored on your device (IndexedDB) and works offline. Signing in is optional: it backs your data up to your own Supabase database and syncs it across devices. No analytics and no bank connections.
 
 ## What's in this folder
 
@@ -9,7 +9,9 @@ A phone-first web app for logging income and spending by hand. Everything is sto
 | `index.html` | App page |
 | `css/styles.css` | Dark, phone-first styles (with iPhone safe areas) |
 | `js/core.js` | Calculation logic: integer-cent money, local dates, totals, splits, budgets, recurring schedules |
-| `js/db.js` | IndexedDB storage. Confirmations are atomic to prevent duplicates |
+| `js/db.js` | IndexedDB storage. Confirmations are atomic to prevent duplicates. Each change is also queued in an outbox for sync |
+| `js/cloud.js` | Optional sign-in (email + password) and sync with Supabase, using plain `fetch` |
+| `supabase/schema.sql` | Database table and security rules. Run once in the Supabase SQL Editor |
 | `js/ui.js` | Small DOM helpers, sheets, dialogs, toasts |
 | `js/app.js` | Screens and forms |
 | `sw.js` | Service worker that caches the app so it works offline |
@@ -51,11 +53,13 @@ Start using it from the Home Screen icon, not the Safari tab. On iPhone, the two
 
 ## Honest limitations (iPhone / storage)
 
-- **No backup.** Data lives only in this app's storage on this phone. You can lose it if you delete the Home Screen app, clear Safari website data, reset or replace your phone, or if iOS reclaims storage. This version has no export. iCloud device backups may not reliably include web-app data, so don't rely on them.
+- **Backup needs sign-in.** Signed out, data lives only in this app's storage on this phone. You can lose it if you delete the Home Screen app, clear Safari website data, reset or replace your phone, or if iOS reclaims storage. Sign in under Settings → Account & sync to keep a copy in your account. Signing out removes the data from that device; it stays in the account.
+- **Accounts are added by hand.** New sign-ups are turned off in Supabase. To add someone, use Supabase → Authentication → Users → Add user. Each account only sees its own data.
+- **Free Supabase projects pause** after about a week with no activity. Data is kept; unpause it from the Supabase dashboard.
 - Safari can clear storage for websites you haven't visited in a while. Home Screen web apps are generally exempt from that, which is another reason to use the Home Screen icon.
 - **No push notifications.** Recurring items show as "due" or "overdue" inside the app only.
 - **Updating the app:** if you change the code, edit `VERSION` in `sw.js` (for example `tally-v1.0.1`) and redeploy. The phone picks up the new version after the app is fully closed and reopened, sometimes on the second launch. Your data is not affected.
-- Changing the host URL creates a different storage area. Keep the same URL once you start recording.
+- Changing the host URL creates a different storage area. Keep the same URL once you start recording, or sign in on the new URL to bring your data over.
 
 ## How the numbers work
 

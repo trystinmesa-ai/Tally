@@ -1,9 +1,9 @@
 // Offline support: cache the app shell and serve it cache-first.
-// Only this app's own files are cached. Financial data lives in IndexedDB and never touches the network.
-const VERSION = 'tally-v1.0.0';
+// Only this app's own files are cached. Sync requests to Supabase (another origin) always go to the network.
+const VERSION = 'tally-v1.1.0';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/styles.css',
-  'js/app.js', 'js/core.js', 'js/db.js', 'js/ui.js',
+  'js/app.js', 'js/cloud.js', 'js/core.js', 'js/db.js', 'js/ui.js',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png', 'icons/icon-maskable-512.png',
 ];
 
